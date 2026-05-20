@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#080808">
+<title>Family Gainz 👑</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, RecaptchaVerifier, signInWithPhoneNumber, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, doc, setDoc, getDoc, collection, getDocs, query, orderBy }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBa7hvhBWq5kQbnQSQMajqGcigswJ9fBaU",
+  authDomain: "familygainz-a6779.firebaseapp.com",
+  projectId: "familygainz-a6779",
+  storageBucket: "familygainz-a6779.firebasestorage.app",
+  messagingSenderId: "217505147683",
+  appId: "1:217505147683:web:628d8de0c5b5ec4ceaba96"
+};
+
+const app   = initializeApp(firebaseConfig);
+const auth  = getAuth(app);
+const db    = getFirestore(app);
+
+// ── Scoring ───────────────────────────────────────────────────────────────────
+const EXERCISES = [
+  { id:"fly",         name:"Single-Arm Cable Fly",      pulley:"Low",  attach:"D-handle",        section:"PUSH" },
+  { id:"lateral",     name:"Cable Lateral Raise",       pulley:"Low",  attach:"D-handle",        section:"PUSH" },
+  { id:"pushdown",    name:"Tricep Pushdown",           pulley:"High", attach:"Rope / Bar",      section:"PUSH" },
+  { id:"row",         name:"Seated Cable Row",          pulley:"Low",  attach:"V-bar",           section:"PULL" },
+  { id:"curl",        name:"Bicep Curl",                pulley:"Low",  attach:"EZ-bar/D-handles",section:"PULL" },
+  { id:"pullthrough", name:"Cable Pull-Through",        pulley:"Low",  attach:"Rope",            section:"LEGS" },
+  { id:"woodchop",    name:"Woodchop High→Low",         pulley:"High", attach:"D-handle / Rope", section:"CORE" },
+];
+
+const SECTIONS = [
+  { key:"PUSH", color:"#C000C8", dot:"linear-gradient(180deg,#FF00FF,#7B00A0)" },
+  { key:"PULL", color:"#00FFFF", dot:"linear-gradient(180deg,#00FFFF,#006688)" },
+  { key:"LEGS", color:"#E000E0", dot:"linear-gradient(180deg,#E000E0,#500050)" },
+  { key:"CORE", color:"#FF00FF", dot:"linear-gradient(180deg,#FF00FF,#880088)" },
+];
+
+function getWeekKey(date = new Date()) {
+  const d = new Date(date);
+  d.setHours(0,0,0,0);
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  const monday = new Date(d.setDate(diff));
+  return `week_${monday.getFullYear()}_${String(monday.getMonth()+1).padStart(2,'0')}_${String(monday.getDate()).padStart(2,'0')}`;
+}
+
+function getPrevWeekKey() {
+  const d = new Date();
+  d.setDate(d.getDate() - 7);
+  return getWeekKey(d);
+}
+
+function calcScore(weekData, prevWeekData) {
+  if (!weekData) return { total: 0, consistency: 0, effort: 0, multiplier: 1.0, breakdown: [] };
+  const breakdown = [];
+  let consistency = 0;
+  let effortRaw = 0;
+
+  // Showed up bonus
+  const exKeys = Object.keys(weekData.exercises || {});
+  const hasAny = exKeys.some(k => weekData.exercises[k]?.sets?.some(s => s.reps || s.weight));
+  if (hasAny) { consistency += 20; breakdown.push({ label:"Showed up 💪", pts:20, type:"good" }); }
+
+  // Per-exercise points
+  let loggedDays = new Set();
+  let loggedExCount = 0;
+  exKeys.forEach(exId => {
+    const ex = weekData.exercises[exId];
+    if (!ex?.sets) return;
+    const validSets = ex.sets.filter(s => s.reps || s.weight);
+    if (validSets.length === 0) return;
+    loggedExCount++;
+    consistency += 10;
+    if (validSets.length >= 3) { consistency += 5; breakdown.push({ label:`${exId} — 3+ sets ✅`, pts:15, type:"good" }); }
+    else { breakdown.push({ label:`${exId} — logged`, pts:10, type:"good" }); }
+    validSets.forEach(s => {
+      const r = parseInt(s.reps) || 0;
+      const w = parseFloat(s.weight) || 0;
+      const sets = 1;
+      effortRaw += sets * r * w;
+    });
+    if (ex.days) ex.days.forEach(d => loggedDays.add(d));
+  });
+
+  // 3-day streak bonus
+  const dayCount = weekData.dayCount || 0;
+  if (dayCount >= 3) { consistency += 50; breakdown.push({ label:"3-Day Streak 🔥", pts:50, type:"streak" }); }
+
+  // Full send bonus
+  if (loggedExCount >= 7) { consistency += 30; breakdown.push({ label:"FULL SEND 💪 All 7 exercises", pts:30, type:"fullsend" }); }
+
+  // Multiplier from previous week
+  let multiplier = 1.0;
+  const isWeek1 = !prevWeekData || Object.keys(prevWeekData?.exercises || {}).length === 0;
+  if (!isWeek1) {
+    const prevEx = Object.keys(prevWeekData.exercises || {}).filter(k =>
+      prevWeekData.exercises[k]?.sets?.some(s => s.reps || s.weight)).length;
+    const prevDays = prevWeekData.dayCount || 0;
+    const curDays  = weekData.dayCount || 0;
+    const improvement = ((loggedExCount - prevEx) / Math.max(prevEx, 1)) * 0.5
+                      + ((curDays - prevDays) / Math.max(prevDays, 1)) * 0.5;
+    multiplier = Math.min(1.5, Math.max(0.75, 1.0 + improvement));
+    multiplier = Math.round(multiplier * 100) / 100;
+  }
+
+  // Normalize effort to max 100
+  const effort = Math.min(100, Math.round(effortRaw / 500));
+  const total  = Math.round((consistency + effort) * multiplier);
+
+  return { total, consistency, effort, multiplier, breakdown, isWeek1 };
+}
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let currentUser = null;
+let userProfile = null;
+let localData   = {};
+let currentWeek = getWeekKey();
+let currentPage = 'login'; // login | tracker | leaderboard | about
+let recaptchaVerifier = null;
+let confirmationResult = null;
+let allUsersCache = [];
+
+// ── Auth state ────────────────────────────────────────────────────────────────
+onAuthStateChanged(auth, async user => {
+  if (user) {
+    currentUser = user;
+    await loadUserProfile();
+    await loadUserData();
+    showPage('tracker');
+  } else {
+    currentUser = null;
+    showPage('login');
+  }
+});
+
+async function loadUserProfile() {
+  const ref = doc(db, 'users', currentUser.uid, 'profile', 'info');
+  const snap = await getDoc(ref);
+  userProfile = snap.exists() ? snap.data() : { username: currentUser.phoneNumber };
+}
+
+async function loadUserData() {
+  try {
+    const ref = doc(db, 'users', currentUser.uid, 'weeks', currentWeek);
+    const snap = await getDoc(ref);
+    localData = snap.exists() ? snap.data() : { exercises: {}, dayCount: 0, date: '' };
+    EXERCISES.forEach(ex => {
+      if (!localData.exercises[ex.id])
+        localData.exercises[ex.id] = { sets:[{reps:'',weight:''}], notes:'' };
+    });
+  } catch(e) { console.error(e); }
+}
+
+async function saveUserData() {
+  if (!currentUser) return;
+  try {
+    await setDoc(doc(db, 'users', currentUser.uid, 'weeks', currentWeek), localData);
+    showToast('✓ Saved');
+  } catch(e) { showToast('Save failed — check connection'); }
+}
+
+async function loadLeaderboard() {
+  try {
+    const usersSnap = await getDocs(collection(db, 'users'));
+    const results = [];
+    for (const userDoc of usersSnap.docs) {
+      const uid = userDoc.id;
+      const profileSnap = await getDoc(doc(db, 'users', uid, 'profile', 'info'));
+      const profile = profileSnap.exists() ? profileSnap.data() : { username: '???' };
+      const weekSnap = await getDoc(doc(db, 'users', uid, 'weeks', currentWeek));
+      const weekData = weekSnap.exists() ? weekSnap.data() : null;
+      const prevSnap = await getDoc(doc(db, 'users', uid, 'weeks', getPrevWeekKey()));
+      const prevData = prevSnap.exists() ? prevSnap.data() : null;
+      const score = calcScore(weekData, prevData);
+      results.push({ uid, username: profile.username || '???', score });
+    }
+    results.sort((a,b) => b.score.total - a.score.total);
+    allUsersCache = results;
+    renderLeaderboard(results);
+  } catch(e) { console.error(e); }
+}
+
+async function checkWinner() {
+  // Check if current user won last week
+  try {
+    const usersSnap = await getDocs(collection(db, 'users'));
+    const results = [];
+    for (const userDoc of usersSnap.docs) {
+      const uid = userDoc.id;
+      const prevSnap = await getDoc(doc(db, 'users', uid, 'weeks', getPrevWeekKey()));
+      const prev2Snap = await getDoc(doc(db, 'users', uid, 'weeks', getWeekKey(new Date(Date.now() - 14*86400000))));
+      const score = calcScore(prevSnap.exists() ? prevSnap.data() : null, prev2Snap.exists() ? prev2Snap.data() : null);
+      results.push({ uid, score });
+    }
+    results.sort((a,b) => b.score.total - a.score.total);
+    if (results.length === 0) return [];
+    const topScore = results[0].score.total;
+    return results.filter(r => r.score.total === topScore && topScore > 0).map(r => r.uid);
+  } catch(e) { return []; }
+}
+
+// ── Phone auth ────────────────────────────────────────────────────────────────
+window.initRecaptcha = function() {
+  if (recaptchaVerifier) return;
+  recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+    size: 'normal',
+    callback: () => { document.getElementById('send-code-btn').disabled = false; }
+  });
+  recaptchaVerifier.render();
+};
+
+window.sendCode = async function() {
+  const phone = document.getElementById('phone-input').value.trim();
+  if (!phone) { showToast('Enter your phone number'); return; }
+  try {
+    confirmationResult = await signInWithPhoneNumber(auth, phone, recaptchaVerifier);
+    document.getElementById('login-step1').style.display = 'none';
+    document.getElementById('login-step2').style.display = 'block';
+    showToast('Code sent! Check your texts 📱');
+  } catch(e) {
+    showToast('Error: ' + e.message);
+    console.error(e);
+  }
+};
+
+window.verifyCode = async function() {
+  const code = document.getElementById('code-input').value.trim();
+  if (!code) { showToast('Enter the 6-digit code'); return; }
+  try {
+    const result = await confirmationResult.confirm(code);
+    // Check if new user — set username
+    const profileRef = doc(db, 'users', result.user.uid, 'profile', 'info');
+    const snap = await getDoc(profileRef);
+    if (!snap.exists()) {
+      document.getElementById('login-step2').style.display = 'none';
+      document.getElementById('login-step3').style.display = 'block';
+    }
+  } catch(e) { showToast('Wrong code — try again'); }
+};
+
+window.setUsername = async function() {
+  const username = document.getElementById('username-input').value.trim();
+  if (!username) { showToast('Enter a username'); return; }
+  await setDoc(doc(db, 'users', currentUser.uid, 'profile', 'info'), { username });
+  userProfile = { username };
+  showPage('tracker');
+};
+
+window.doSignOut = async function() {
+  await signOut(auth);
+};
+
+// ── Pages ─────────────────────────────────────────────────────────────────────
+async function showPage(page) {
+  currentPage = page;
+  document.getElementById('app').innerHTML = '';
+  if (page === 'login')       renderLogin();
+  if (page === 'tracker')     await renderTracker();
+  if (page === 'leaderboard') await renderLeaderboard();
+  if (page === 'about')       renderAbout();
+}
+window.showPage = showPage;
+
+// ── LOGIN ─────────────────────────────────────────────────────────────────────
+function renderLogin() {
+  document.getElementById('app').innerHTML = `
+  <div class="login-wrap">
+    <div class="login-crown">
+      <img src="https://i.imgur.com/placeholder.png" alt="crown" class="crown-img-login" onerror="this.style.fontSize='5rem';this.outerHTML='<div style=\'font-size:5rem;text-align:center\'>👑</div>'">
+      <div class="login-title">Family<br>Gainz</div>
+      <div class="login-sub">WHO WANTS THE CROWN THIS WEEK?</div>
+    </div>
+
+    <div id="login-step1" class="login-card">
+      <div class="login-label">YOUR PHONE NUMBER</div>
+      <input id="phone-input" class="login-input" type="tel" placeholder="+1 (555) 000-0000"
+        inputmode="tel" autocomplete="tel">
+      <div id="recaptcha-container" style="margin:1rem 0;display:flex;justify-content:center"></div>
+      <button id="send-code-btn" class="login-btn" onclick="sendCode()" disabled>
+        SEND CODE 📱
+      </button>
+      <div class="login-hint">We'll text you a 6-digit code</div>
+    </div>
+
+    <div id="login-step2" class="login-card" style="display:none">
+      <div class="login-label">ENTER YOUR CODE</div>
+      <input id="code-input" class="login-input" type="number" inputmode="numeric"
+        placeholder="_ _ _ _ _ _" maxlength="6">
+      <button class="login-btn" onclick="verifyCode()">VERIFY ✓</button>
+    </div>
+
+    <div id="login-step3" class="login-card" style="display:none">
+      <div class="login-label">CHOOSE YOUR NAME</div>
+      <div class="login-hint" style="margin-bottom:0.75rem">This is what the leaderboard shows</div>
+      <input id="username-input" class="login-input" type="text" placeholder="e.g. Dad, Mom, Champ...">
+      <button class="login-btn" onclick="setUsername()">LET'S GO 🔥</button>
+    </div>
+  </div>`;
+  setTimeout(initRecaptcha, 300);
+}
+
+// ── TRACKER ───────────────────────────────────────────────────────────────────
+async function renderTracker() {
+  const winners = await checkWinner();
+  const isWinner = winners.includes(currentUser?.uid);
+  const crownHTML = buildCrownHTML(winners.length, isWinner);
+  const prevSnap = await getDoc(doc(db, 'users', currentUser.uid, 'weeks', getPrevWeekKey()));
+  const prevData = prevSnap.exists() ? prevSnap.data() : null;
+  const score = calcScore(localData, prevData);
+
+  document.getElementById('app').innerHTML = `
+  <div class="app-wrap">
+    <header>
+      <div class="header-top">
+        <div class="header-left">
+          ${crownHTML}
+          <div>
+            <div class="app-title">Gainz</div>
+            <div class="app-sub">${userProfile?.username || ''} · ${score.multiplier !== 1.0 ? (score.multiplier > 1.0 ? '📈 +'+Math.round((score.multiplier-1)*100)+'% multiplier' : '📉 '+Math.round((score.multiplier-1)*100)+'% multiplier') : 'Week 1 baseline'}</div>
+          </div>
+        </div>
+        <div class="header-btns">
+          <button class="icon-btn" onclick="showPage('leaderboard')" title="Leaderboard">🏆</button>
+          <button class="icon-btn" onclick="showPage('about')" title="About">❓</button>
+          <button class="icon-btn" onclick="doSignOut()" title="Sign out">🚪</button>
+        </div>
+      </div>
+      <div class="score-bar">
+        <div class="score-item">
+          <div class="score-val" id="live-score">${score.total}</div>
+          <div class="score-lbl">PTS THIS WEEK</div>
+        </div>
+        <div class="score-div"></div>
+        <div class="score-item">
+          <div class="score-val">${score.consistency}</div>
+          <div class="score-lbl">CONSISTENCY</div>
+        </div>
+        <div class="score-div"></div>
+        <div class="score-item">
+          <div class="score-val ${score.multiplier > 1.0 ? 'mult-good' : score.multiplier < 1.0 ? 'mult-bad' : ''}">${score.multiplier}x</div>
+          <div class="score-lbl">MULTIPLIER</div>
+        </div>
+        <div class="score-div"></div>
+        <div class="score-item">
+          <div class="score-val">${score.effort}</div>
+          <div class="score-lbl">EFFORT</div>
+        </div>
+      </div>
+      <div class="week-tabs-wrap">
+        <div class="week-tabs" id="weekTabs"></div>
+      </div>
+    </header>
+    <div class="scroll-area" id="scrollArea">
+      <div id="weekContent"></div>
+    </div>
+    <div class="bottom-bar">
+      <button class="bar-btn primary" onclick="collectAndSave()">💾 Save</button>
+      <button class="bar-btn secondary" onclick="exportExcel()">⬇ Excel</button>
+    </div>
+  </div>
+  <div class="bonus-badge" id="bonusBadge"></div>
+  <div class="toast" id="toast"></div>`;
+
+  buildWeekTabs();
+  buildWeekContent();
+}
+
+function buildCrownHTML(winnerCount, isWinner) {
+  if (!isWinner || winnerCount === 0) return '<div style="width:8px"></div>';
+  const size = winnerCount === 1 ? 44 : winnerCount === 2 ? 32 : 24;
+  const crowns = Array(winnerCount).fill(`<span style="font-size:${size}px;filter:drop-shadow(0 0 8px gold);animation:crownPulse 2s ease-in-out infinite">👑</span>`).join('');
+  return `<div style="display:flex;align-items:center;gap:2px">${crowns}</div>`;
+}
+
+function buildWeekTabs() {
+  const tabs = document.getElementById('weekTabs');
+  if (!tabs) return;
+  tabs.innerHTML = '';
+  for (let w = 1; w <= 8; w++) {
+    const wKey = getWeekKeyByNumber(w);
+    const btn = document.createElement('button');
+    btn.className = 'wtab' + (wKey === currentWeek ? ' active' : '');
+    btn.id = `tab-${w}`;
+    btn.textContent = `WK ${w}`;
+    btn.onclick = () => switchWeekTab(w, wKey);
+    tabs.appendChild(btn);
+  }
+}
+
+function getWeekKeyByNumber(n) {
+  // Week 1 = current week, going backwards
+  const d = new Date();
+  d.setDate(d.getDate() - (n-1)*7);
+  return getWeekKey(d);
+}
+
+async function switchWeekTab(n, wKey) {
+  collectDOM();
+  await saveUserData();
+  currentWeek = wKey;
+  await loadUserData();
+  document.querySelectorAll('.wtab').forEach(t => t.classList.remove('active'));
+  document.getElementById(`tab-${n}`)?.classList.add('active');
+  buildWeekContent();
+}
+
+function buildWeekContent() {
+  const container = document.getElementById('weekContent');
+  if (!container) return;
+  let html = `<div class="week-intro">
+    <div class="week-label">Week</div>
+    <input class="week-date" type="text" placeholder="e.g. May 20–26" value="${localData.date||''}">
+  </div><div class="glow-divider"></div>`;
+
+  // Days logged counter
+  html += `<div class="days-row">
+    <div class="days-label">DAYS LOGGED THIS WEEK</div>
+    <div class="days-btns">
+      ${['M','T','W','T','F','S','S'].map((d,i) => `
+        <button class="day-btn ${(localData.days||[]).includes(i) ? 'active' : ''}"
+          onclick="toggleDay(${i})">${d}</button>`).join('')}
+    </div>
+  </div>`;
+
+  SECTIONS.forEach(sec => {
+    const secExs = EXERCISES.filter(e => e.section === sec.key);
+    html += `<div class="section-hdr">
+      <span class="section-dot" style="background:${sec.color};box-shadow:0 0 8px ${sec.color}66"></span>
+      <span class="section-hdr-text">${sec.key}</span>
+      <div class="section-hdr-line"></div>
+    </div>`;
+    secExs.forEach(ex => {
+      const exData = localData.exercises[ex.id] || { sets:[{reps:'',weight:''}], notes:'' };
+      html += buildCard(ex, exData, sec);
+    });
+  });
+  container.innerHTML = html;
+  attachInputEvents();
+}
+
+function buildCard(ex, exData, sec) {
+  const setsHTML = exData.sets.map((s,i) => buildSetRow(ex.id, i, s)).join('');
+  return `
+  <div class="ex-card" id="card-${ex.id}">
+    <div class="ex-hdr" onclick="toggleCard('${ex.id}')">
+      <div class="ex-indicator" style="background:${sec.dot}"></div>
+      <div class="ex-info">
+        <div class="ex-name">${ex.name}</div>
+        <div class="ex-tags">
+          <span class="ex-tag">${ex.pulley}</span>
+          <span class="ex-tag">${ex.attach}</span>
+        </div>
+      </div>
+      <span class="ex-chevron">▼</span>
+    </div>
+    <div class="ex-body">
+      <div class="set-col-hdrs">
+        <div class="col-hdr"></div>
+        <div class="col-hdr">Reps</div>
+        <div class="col-hdr">Weight lb</div>
+        <div class="col-hdr"></div>
+      </div>
+      <div class="sets-container" id="sets-${ex.id}">${setsHTML}</div>
+      <button class="add-set-row" onclick="addSet('${ex.id}')">+ Add Set</button>
+      <div class="notes-area">
+        <label class="notes-label">Notes / Form cues</label>
+        <textarea class="notes-ta" data-ex="${ex.id}" placeholder="Felt strong, increase next week...">${exData.notes||''}</textarea>
+      </div>
+    </div>
+  </div>`;
+}
+
+function buildSetRow(exId, idx, s) {
+  return `<div class="set-row" data-ex="${exId}">
+    <div class="set-num-badge">S${idx+1}</div>
+    <input class="set-input reps-in" type="number" inputmode="numeric" pattern="[0-9]*" min="0" placeholder="—" value="${s.reps||''}">
+    <input class="set-input weight-in" type="number" inputmode="decimal" min="0" step="2.5" placeholder="—" value="${s.weight||''}">
+    <button class="remove-btn" onclick="removeSet(this,'${exId}')">✕</button>
+  </div>`;
+}
+
+window.toggleCard = function(exId) {
+  document.getElementById(`card-${exId}`).classList.toggle('open');
+};
+
+window.addSet = function(exId) {
+  const container = document.getElementById(`sets-${exId}`);
+  const idx = container.querySelectorAll('.set-row').length;
+  const div = document.createElement('div');
+  div.innerHTML = buildSetRow(exId, idx, {reps:'',weight:''});
+  container.appendChild(div.firstElementChild);
+  container.querySelectorAll('.set-input').forEach(el =>
+    el.addEventListener('change', onDataChange));
+};
+
+window.removeSet = function(btn, exId) {
+  const container = document.getElementById(`sets-${exId}`);
+  if (container.querySelectorAll('.set-row').length <= 1) return;
+  btn.closest('.set-row').remove();
+  container.querySelectorAll('.set-row').forEach((row,i) =>
+    row.querySelector('.set-num-badge').textContent = `S${i+1}`);
+  onDataChange();
+};
+
+window.toggleDay = function(dayIdx) {
+  if (!localData.days) localData.days = [];
+  const i = localData.days.indexOf(dayIdx);
+  if (i === -1) localData.days.push(dayIdx);
+  else localData.days.splice(i, 1);
+  localData.dayCount = localData.days.length;
+  document.querySelectorAll('.day-btn').forEach((btn, idx) => {
+    btn.classList.toggle('active', localData.days.includes(idx));
+  });
+  checkBonuses();
+  updateScoreBar();
+};
+
+function attachInputEvents() {
+  document.querySelectorAll('.set-input, .notes-ta, .week-date').forEach(el =>
+    el.addEventListener('change', onDataChange));
+}
+
+function onDataChange() {
+  collectDOM();
+  checkBonuses();
+  updateScoreBar();
+}
+
+function collectDOM() {
+  const dateEl = document.querySelector('.week-date');
+  if (dateEl) localData.date = dateEl.value;
+  EXERCISES.forEach(ex => {
+    const rows = document.querySelectorAll(`.set-row[data-ex="${ex.id}"]`);
+    if (!rows.length) return;
+    const sets = [];
+    rows.forEach(row => sets.push({
+      reps:   row.querySelector('.reps-in').value,
+      weight: row.querySelector('.weight-in').value,
+    }));
+    const nt = document.querySelector(`.notes-ta[data-ex="${ex.id}"]`);
+    if (!localData.exercises[ex.id]) localData.exercises[ex.id] = {};
+    localData.exercises[ex.id].sets  = sets;
+    localData.exercises[ex.id].notes = nt ? nt.value : '';
+  });
+}
+
+function checkBonuses() {
+  const loggedEx = EXERCISES.filter(ex => {
+    const exData = localData.exercises[ex.id];
+    return exData?.sets?.some(s => s.reps || s.weight);
+  }).length;
+  const days = (localData.days || []).length;
+
+  if (days >= 3 && !window._streakShown) {
+    window._streakShown = true;
+    showBonus('🔥 3-DAY STREAK! +50 PTS', 'streak');
+  }
+  if (loggedEx >= 7 && !window._fullSendShown) {
+    window._fullSendShown = true;
+    showBonus('💪 FULL SEND! ALL 7 EXERCISES +30 PTS', 'fullsend');
+  }
+}
+
+function updateScoreBar() {
+  const score = calcScore(localData, null);
+  const el = document.getElementById('live-score');
+  if (el) {
+    el.textContent = score.total;
+    el.style.animation = 'none';
+    el.offsetHeight;
+    el.style.animation = 'scoreFlash 0.4s ease';
+  }
+}
+
+function showBonus(msg, type) {
+  const badge = document.getElementById('bonusBadge');
+  if (!badge) return;
+  badge.textContent = msg;
+  badge.className = `bonus-badge show bonus-${type}`;
+  setTimeout(() => badge.className = 'bonus-badge', 3000);
+}
+
+window.collectAndSave = async function() {
+  collectDOM();
+  await saveUserData();
+};
+
+// ── LEADERBOARD ───────────────────────────────────────────────────────────────
+async function renderLeaderboard(results) {
+  if (!results) {
+    document.getElementById('app').innerHTML = `
+    <div class="app-wrap">
+      ${navBar('leaderboard')}
+      <div class="scroll-area">
+        <div style="text-align:center;padding:3rem;color:var(--muted)">
+          <div style="font-size:2rem">⏳</div>
+          <div style="margin-top:0.5rem;font-family:'Share Tech Mono',monospace;font-size:0.8rem">Loading leaderboard...</div>
+        </div>
+      </div>
+    </div>
+    <div class="toast" id="toast"></div>`;
+    await loadLeaderboard();
+    return;
+  }
+
+  const topScore = results[0]?.score.total || 0;
+  const winners = results.filter(r => r.score.total === topScore && topScore > 0);
+
+  let boardHTML = results.map((r, i) => {
+    const isWinner = winners.find(w => w.uid === r.uid);
+    const isMe = r.uid === currentUser?.uid;
+    const multClass = r.score.multiplier > 1.0 ? 'mult-good' : r.score.multiplier < 1.0 ? 'mult-bad' : '';
+    return `
+    <div class="lb-row ${isMe ? 'lb-me' : ''} ${isWinner ? 'lb-winner' : ''}">
+      <div class="lb-rank">${i === 0 ? '👑' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i+1}`}</div>
+      <div class="lb-info">
+        <div class="lb-name">${r.username}${isMe ? ' <span class="you-tag">YOU</span>' : ''}</div>
+        <div class="lb-detail">
+          Consistency: ${r.score.consistency} · Effort: ${r.score.effort}
+          · <span class="${multClass}">${r.score.multiplier}x mult</span>
+          ${r.score.isWeek1 ? '<span class="baseline-tag">BASELINE WK</span>' : ''}
+        </div>
+      </div>
+      <div class="lb-score">${r.score.total}</div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('app').innerHTML = `
+  <div class="app-wrap">
+    ${navBar('leaderboard')}
+    <div class="scroll-area">
+      <div style="padding:1.25rem">
+        <div class="lb-header">
+          <div class="lb-title">THIS WEEK</div>
+          <div class="lb-sub">Resets every Sunday · ${new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>
+        </div>
+        ${winners.length > 0 ? `
+        <div class="winner-banner">
+          <div class="winner-crowns">${Array(winners.length).fill('👑').join(' ')}</div>
+          <div class="winner-text">CURRENT LEADER${winners.length > 1 ? 'S' : ''}</div>
+          <div class="winner-names">${winners.map(w=>w.username).join(' & ')}</div>
+        </div>` : ''}
+        <div class="lb-list">${boardHTML}</div>
+        <div class="lb-refresh">
+          <button class="bar-btn secondary" onclick="loadLeaderboard()" style="width:100%">🔄 Refresh</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>`;
+}
+window.loadLeaderboard = loadLeaderboard;
+
+// ── ABOUT ─────────────────────────────────────────────────────────────────────
+function renderAbout() {
+  document.getElementById('app').innerHTML = `
+  <div class="app-wrap">
+    ${navBar('about')}
+    <div class="scroll-area">
+      <div class="about-wrap">
+        <div class="about-crown">👑</div>
+        <h1 class="about-title">How It Works</h1>
+        <p class="about-intro">This app isn't about who lifts the most. It's about who shows up the most — and keeps getting better. Here's exactly how points work so nobody's confused about the crown.</p>
+
+        <div class="about-section">
+          <div class="about-section-title">🔵 SHOWING UP (Consistency Points)</div>
+          <div class="about-rule"><span class="pts">+20</span> Just logging ANY workout this week — you showed up, you get points</div>
+          <div class="about-rule"><span class="pts">+10</span> Each exercise you log with at least 1 set</div>
+          <div class="about-rule"><span class="pts">+5</span> Bonus for completing 3 or more sets on any exercise</div>
+          <div class="about-rule"><span class="pts bonus-fire">+50 🔥</span> 3-DAY STREAK — log workouts on 3 different days this week</div>
+          <div class="about-rule"><span class="pts bonus-full">+30 💪</span> FULL SEND — log all 7 exercises in one week</div>
+          <div class="about-why">Why? Because showing up consistently beats going hard once. Three solid days beats one monster session every time.</div>
+        </div>
+
+        <div class="about-section">
+          <div class="about-section-title">🔴 EFFORT SCORE (Volume Points)</div>
+          <div class="about-rule">Every set you log counts: <strong>Sets × Reps × Weight</strong></div>
+          <div class="about-rule">Normalized to a max of 100 points so it never completely overshadows consistency</div>
+          <div class="about-why">Why? Because effort deserves recognition — but it can't be everything. Someone lifting 200lbs shouldn't automatically beat someone lifting 50lbs if that person is showing up every day.</div>
+        </div>
+
+        <div class="about-section">
+          <div class="about-section-title">⚡ THE MULTIPLIER (Your Personal Edge)</div>
+          <div class="about-rule"><strong>Week 1</strong> — Everyone starts at 1.0x. This is your baseline. No multiplier, just raw points. Get your numbers in the system.</div>
+          <div class="about-rule"><strong>Week 2+</strong> — Your multiplier compares YOU against YOUR OWN last week</div>
+          <div class="about-rule"><span class="pts bonus-fire">Up to 1.5x 📈</span> — Did more days or exercises than last week</div>
+          <div class="about-rule"><span class="pts" style="color:var(--muted)">0.75x 📉</span> — Did less than last week</div>
+          <div class="about-rule">Final Score = (Consistency + Effort) × Your Multiplier</div>
+          <div class="about-why">Why? So a beginner can beat an advanced lifter if they're improving faster. You're competing against yourself first, the family second. Get better every week and your multiplier compounds.</div>
+        </div>
+
+        <div class="about-section">
+          <div class="about-section-title">👑 THE CROWN</div>
+          <div class="about-rule">Highest score when Sunday midnight hits = you get the crown for the next week</div>
+          <div class="about-rule">Crown shows on your header all week as a badge of honor</div>
+          <div class="about-rule">Tied? Everyone who tied gets a crown — 2-way tie = 2 crowns, 3-way = 3 crowns</div>
+          <div class="about-rule">Crown resets every Sunday. Defend it or lose it.</div>
+          <div class="about-why">This is a family competition but it's really a self-improvement tool. The person who consistently improves week over week wins more often than the person who goes hard once and disappears. Let's get moving. 🔥</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="toast" id="toast"></div>`;
+}
+
+// ── Nav bar ───────────────────────────────────────────────────────────────────
+function navBar(active) {
+  return `<header>
+    <div class="header-top">
+      <div class="header-left">
+        <div>
+          <div class="app-title">Gainz</div>
+          <div class="app-sub">${userProfile?.username || ''}</div>
+        </div>
+      </div>
+      <div class="header-btns">
+        <button class="icon-btn ${active==='tracker'?'icon-active':''}" onclick="showPage('tracker')" title="Tracker">🏋️</button>
+        <button class="icon-btn ${active==='leaderboard'?'icon-active':''}" onclick="showPage('leaderboard')" title="Leaderboard">🏆</button>
+        <button class="icon-btn ${active==='about'?'icon-active':''}" onclick="showPage('about')" title="About">❓</button>
+        <button class="icon-btn" onclick="doSignOut()" title="Sign out">🚪</button>
+      </div>
+    </div>
+  </header>`;
+}
+
+// ── Excel export ──────────────────────────────────────────────────────────────
+window.exportExcel = function() {
+  collectDOM();
+  const wb = XLSX.utils.book_new();
+  const rows = [['Exercise','Reps','Weight (lb)','Notes']];
+  EXERCISES.forEach(ex => {
+    const exData = localData.exercises[ex.id];
+    if (exData?.sets) {
+      exData.sets.forEach((s,i) => {
+        rows.push([i===0?ex.name:'', s.reps, s.weight, i===0?(exData.notes||''):'']);
+      });
+    }
+  });
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [{wch:28},{wch:8},{wch:12},{wch:28}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Week');
+  XLSX.writeFile(wb, 'gainz_week.xlsx');
+  showToast('Excel downloaded!');
+};
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+window.showToast = showToast;
+</script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Permanent+Marker&family=Rubik+Dirt&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
+
+:root {
+  --purple-deep: #7B00A0;
+  --purple:      #C000C8;
+  --magenta:     #E000E0;
+  --pink:        #FF00FF;
+  --cyan:        #00FFFF;
+  --gold:        #FFD700;
+  --black:       #080808;
+  --surface:     #111111;
+  --card:        #181818;
+  --border:      #2a002e;
+  --text:        #F0F0F0;
+  --muted:       #888888;
+  --white:       #FFFFFF;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: 'Rajdhani', sans-serif;
+  background: var(--black);
+  color: var(--text);
+  position: fixed;
+  width: 100%;
+  height: 100%;
+}
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background:
+    radial-gradient(ellipse 60% 40% at 10% 0%, rgba(192,0,200,0.18) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 35% at 90% 100%, rgba(0,255,255,0.10) 0%, transparent 60%);
+  pointer-events: none; z-index: 0;
+}
+
+#app { height: 100%; display: flex; flex-direction: column; position: relative; z-index: 1; }
+.app-wrap { display: flex; flex-direction: column; height: 100%; }
+
+/* ── Login ── */
+.login-wrap {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; min-height: 100vh;
+  padding: 2rem 1.5rem; gap: 1.5rem;
+}
+.login-crown { text-align: center; }
+.crown-img-login { width: 120px; height: 120px; object-fit: contain; }
+.login-title {
+  font-family: 'Rubik Dirt', cursive;
+  font-size: 3rem; line-height: 1;
+  background: linear-gradient(135deg, var(--purple) 0%, var(--pink) 50%, var(--cyan) 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  filter: drop-shadow(0 0 16px rgba(255,0,255,0.5));
+  margin-top: 0.5rem;
+}
+.login-sub {
+  font-family: 'Permanent Marker', cursive;
+  font-size: 0.85rem; color: var(--gold);
+  margin-top: 0.4rem; letter-spacing: 0.05em;
+  text-shadow: 0 0 12px rgba(255,215,0,0.5);
+}
+.login-card {
+  width: 100%; max-width: 380px;
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 16px; padding: 1.5rem;
+}
+.login-label {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.7rem; letter-spacing: 0.15em;
+  color: var(--muted); margin-bottom: 0.75rem;
+}
+.login-input {
+  width: 100%; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 10px;
+  color: var(--text); font-family: 'Share Tech Mono', monospace;
+  font-size: 1.1rem; padding: 0.75rem 1rem;
+  outline: none; margin-bottom: 1rem;
+  transition: border-color 0.15s;
+}
+.login-input:focus { border-color: var(--pink); }
+.login-btn {
+  width: 100%; padding: 0.85rem;
+  background: linear-gradient(135deg, var(--purple-deep), var(--magenta), var(--pink));
+  border: none; border-radius: 10px;
+  color: var(--white); font-family: 'Rajdhani', sans-serif;
+  font-size: 1rem; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  cursor: pointer; transition: opacity 0.15s;
+  box-shadow: 0 4px 20px rgba(224,0,224,0.4);
+}
+.login-btn:disabled { opacity: 0.4; }
+.login-btn:active { opacity: 0.85; }
+.login-hint { font-size: 0.78rem; color: var(--muted); text-align: center; margin-top: 0.6rem; }
+
+/* ── Header ── */
+header {
+  position: relative; z-index: 10;
+  padding: 1rem 1.25rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(8,8,8,0.95);
+  backdrop-filter: blur(12px);
+  flex-shrink: 0;
+}
+.header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; }
+.header-left { display: flex; align-items: center; gap: 0.5rem; }
+.app-title {
+  font-family: 'Rubik Dirt', cursive;
+  font-size: 2rem; line-height: 1;
+  background: linear-gradient(135deg, var(--purple) 0%, var(--pink) 50%, var(--cyan) 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+  filter: drop-shadow(0 0 10px rgba(255,0,255,0.35));
+}
+.app-sub { font-size: 0.65rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-family: 'Share Tech Mono', monospace; margin-top: 0.15rem; }
+.header-btns { display: flex; gap: 0.4rem; align-items: center; flex-shrink: 0; }
+.icon-btn {
+  width: 40px; height: 40px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text); font-size: 1rem; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s; -webkit-appearance: none;
+}
+.icon-btn:active { transform: scale(0.92); }
+.icon-active { border-color: var(--purple); background: rgba(192,0,200,0.15); }
+
+/* ── Score bar ── */
+.score-bar {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.6rem 0; margin-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+.score-item { flex: 1; text-align: center; }
+.score-val {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 1.3rem; font-weight: 500; color: var(--pink);
+  line-height: 1;
+}
+.score-lbl { font-size: 0.55rem; letter-spacing: 0.1em; color: var(--muted); margin-top: 0.2rem; text-transform: uppercase; }
+.score-div { width: 1px; height: 28px; background: var(--border); flex-shrink: 0; }
+.mult-good { color: var(--cyan) !important; text-shadow: 0 0 8px rgba(0,255,255,0.6); }
+.mult-bad  { color: var(--muted) !important; }
+
+@keyframes scoreFlash { 0%{transform:scale(1)} 50%{transform:scale(1.2);color:var(--gold)} 100%{transform:scale(1)} }
+@keyframes crownPulse { 0%,100%{filter:drop-shadow(0 0 8px gold)} 50%{filter:drop-shadow(0 0 20px gold)} }
+
+/* ── Week tabs ── */
+.week-tabs-wrap { margin-top: 0.6rem; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.week-tabs-wrap::-webkit-scrollbar { display: none; }
+.week-tabs { display: flex; gap: 0.4rem; width: max-content; }
+.wtab {
+  padding: 0.35rem 0.8rem; border-radius: 20px;
+  font-family: 'Share Tech Mono', monospace; font-size: 0.7rem;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--muted); cursor: pointer; white-space: nowrap;
+  transition: all 0.15s; -webkit-appearance: none;
+}
+.wtab.active {
+  background: linear-gradient(135deg, var(--purple-deep), var(--magenta));
+  border-color: var(--pink); color: var(--white);
+  box-shadow: 0 0 10px rgba(224,0,224,0.35);
+}
+
+/* ── Scroll + content ── */
+.scroll-area { flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding-bottom: calc(80px + var(--safe-bottom)); }
+
+/* ── Days row ── */
+.days-row { padding: 0.75rem 1.25rem; }
+.days-label { font-family: 'Share Tech Mono', monospace; font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.5rem; }
+.days-btns { display: flex; gap: 0.4rem; }
+.day-btn {
+  flex: 1; height: 38px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--muted); font-family: 'Share Tech Mono', monospace;
+  font-size: 0.7rem; cursor: pointer; -webkit-appearance: none;
+  transition: all 0.15s;
+}
+.day-btn.active {
+  background: linear-gradient(135deg, var(--purple-deep), var(--purple));
+  border-color: var(--pink); color: var(--white);
+  box-shadow: 0 0 8px rgba(255,0,255,0.3);
+}
+
+/* ── Section ── */
+.section-hdr { margin: 0.75rem 1.25rem 0.5rem; display: flex; align-items: center; gap: 0.6rem; }
+.section-hdr-line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--border), transparent); }
+.section-hdr-text { font-family: 'Permanent Marker', cursive; font-size: 0.8rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+.section-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.glow-divider { height: 1px; background: linear-gradient(90deg, transparent, var(--purple-deep), var(--magenta), var(--purple-deep), transparent); margin: 0.1rem 1.25rem 0.75rem; opacity: 0.4; }
+.week-intro { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.25rem 0.3rem; gap: 0.75rem; }
+.week-label { font-family: 'Permanent Marker', cursive; font-size: 1.5rem; background: linear-gradient(90deg, var(--pink), var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; flex-shrink: 0; }
+.week-date { flex: 1; background: transparent; border: none; border-bottom: 1px solid var(--border); color: var(--muted); font-family: 'Share Tech Mono', monospace; font-size: 0.75rem; padding: 0.3rem 0.4rem; outline: none; min-width: 0; text-align: right; }
+.week-date:focus { border-color: var(--purple); color: var(--text); }
+.week-date::placeholder { color: var(--border); }
+
+/* ── Exercise cards ── */
+.ex-card { margin: 0 0.75rem 0.6rem; background: var(--card); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; transition: border-color 0.2s; }
+.ex-card.open { border-color: var(--purple); }
+.ex-hdr { display: flex; align-items: center; padding: 0.9rem 1rem; gap: 0.75rem; cursor: pointer; min-height: 56px; user-select: none; }
+.ex-hdr:active { background: rgba(192,0,200,0.05); }
+.ex-indicator { width: 3px; height: 32px; border-radius: 2px; flex-shrink: 0; }
+.ex-info { flex: 1; min-width: 0; }
+.ex-name { font-size: 0.95rem; font-weight: 700; color: var(--text); line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ex-tags { display: flex; gap: 0.35rem; margin-top: 0.3rem; flex-wrap: wrap; }
+.ex-tag { font-family: 'Share Tech Mono', monospace; font-size: 0.6rem; letter-spacing: 0.06em; color: var(--muted); background: rgba(255,255,255,0.04); border: 1px solid var(--border); border-radius: 4px; padding: 0.1rem 0.4rem; }
+.ex-chevron { color: var(--muted); font-size: 0.65rem; transition: transform 0.2s; flex-shrink: 0; }
+.ex-card.open .ex-chevron { transform: rotate(180deg); color: var(--pink); }
+.ex-body { display: none; border-top: 1px solid var(--border); padding: 0.75rem 1rem 1rem; }
+.ex-card.open .ex-body { display: block; }
+.set-col-hdrs { display: grid; grid-template-columns: 36px 1fr 1fr 28px; gap: 0.4rem; margin-bottom: 0.4rem; }
+.col-hdr { font-family: 'Share Tech Mono', monospace; font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); text-align: center; }
+.set-row { display: grid; grid-template-columns: 36px 1fr 1fr 28px; gap: 0.4rem; margin-bottom: 0.4rem; align-items: center; }
+.set-num-badge { height: 44px; background: linear-gradient(135deg, var(--purple-deep), var(--border)); border: 1px solid var(--purple-deep); border-radius: 8px; font-family: 'Share Tech Mono', monospace; font-size: 0.7rem; color: var(--purple); display: flex; align-items: center; justify-content: center; }
+.set-input { height: 44px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: 'Share Tech Mono', monospace; font-size: 1.1rem; text-align: center; outline: none; width: 100%; -webkit-appearance: none; transition: border-color 0.15s, box-shadow 0.15s; }
+.set-input:focus { border-color: var(--pink); box-shadow: 0 0 0 2px rgba(255,0,255,0.15); }
+.set-input.weight-in:focus { border-color: var(--cyan); box-shadow: 0 0 0 2px rgba(0,255,255,0.15); }
+.set-input::placeholder { color: var(--border); font-size: 0.8rem; }
+.remove-btn { width: 28px; height: 44px; background: none; border: none; color: var(--border); font-size: 1rem; cursor: pointer; display: flex; align-items: center; justify-content: center; border-radius: 6px; transition: color 0.15s; -webkit-appearance: none; }
+.remove-btn:active { color: var(--pink); }
+.add-set-row { width: 100%; margin-top: 0.5rem; padding: 0.7rem; background: transparent; border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); font-family: 'Rajdhani', sans-serif; font-size: 0.82rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; transition: all 0.15s; -webkit-appearance: none; }
+.add-set-row:active { border-color: var(--purple); color: var(--purple); background: rgba(192,0,200,0.05); }
+.notes-area { margin-top: 0.75rem; }
+.notes-label { font-family: 'Share Tech Mono', monospace; font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 0.4rem; }
+.notes-ta { width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-family: 'Rajdhani', sans-serif; font-size: 0.9rem; padding: 0.6rem 0.8rem; resize: none; height: 60px; outline: none; }
+.notes-ta:focus { border-color: var(--border); color: var(--text); }
+
+/* ── Bottom bar ── */
+.bottom-bar { position: relative; z-index: 10; background: rgba(8,8,8,0.97); backdrop-filter: blur(12px); border-top: 1px solid var(--border); padding: 0.75rem 1.25rem; padding-bottom: calc(0.75rem + var(--safe-bottom)); display: flex; gap: 0.6rem; flex-shrink: 0; }
+.bar-btn { flex: 1; height: 50px; border-radius: 12px; border: none; font-family: 'Rajdhani', sans-serif; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; cursor: pointer; transition: all 0.15s; -webkit-appearance: none; }
+.bar-btn:active { transform: scale(0.97); }
+.bar-btn.primary { background: linear-gradient(135deg, var(--purple-deep) 0%, var(--magenta) 60%, var(--pink) 100%); color: var(--white); box-shadow: 0 4px 20px rgba(224,0,224,0.35); }
+.bar-btn.secondary { background: linear-gradient(135deg, rgba(0,255,255,0.1), rgba(0,255,255,0.05)); border: 1px solid rgba(0,255,255,0.25); color: var(--cyan); }
+
+/* ── Leaderboard ── */
+.lb-header { margin-bottom: 1rem; }
+.lb-title { font-family: 'Rubik Dirt', cursive; font-size: 1.8rem; background: linear-gradient(90deg, var(--pink), var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.lb-sub { font-family: 'Share Tech Mono', monospace; font-size: 0.65rem; color: var(--muted); margin-top: 0.25rem; letter-spacing: 0.08em; }
+.winner-banner { background: linear-gradient(135deg, rgba(255,215,0,0.08), rgba(255,215,0,0.03)); border: 1px solid rgba(255,215,0,0.3); border-radius: 14px; padding: 1.25rem; text-align: center; margin-bottom: 1rem; }
+.winner-crowns { font-size: 2.5rem; filter: drop-shadow(0 0 16px gold); animation: crownPulse 2s ease-in-out infinite; margin-bottom: 0.4rem; }
+.winner-text { font-family: 'Share Tech Mono', monospace; font-size: 0.6rem; letter-spacing: 0.2em; color: var(--gold); text-transform: uppercase; }
+.winner-names { font-family: 'Permanent Marker', cursive; font-size: 1.4rem; color: var(--gold); margin-top: 0.25rem; text-shadow: 0 0 16px rgba(255,215,0,0.5); }
+.lb-list { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 1rem; }
+.lb-row { display: flex; align-items: center; gap: 0.75rem; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 0.9rem 1rem; }
+.lb-winner { border-color: rgba(255,215,0,0.4); background: rgba(255,215,0,0.04); }
+.lb-me { border-color: var(--purple); }
+.lb-rank { font-family: 'Share Tech Mono', monospace; font-size: 1.2rem; width: 32px; text-align: center; flex-shrink: 0; }
+.lb-info { flex: 1; min-width: 0; }
+.lb-name { font-size: 1rem; font-weight: 700; color: var(--text); }
+.lb-detail { font-family: 'Share Tech Mono', monospace; font-size: 0.62rem; color: var(--muted); margin-top: 0.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb-score { font-family: 'Rubik Dirt', cursive; font-size: 1.6rem; color: var(--pink); flex-shrink: 0; }
+.you-tag { background: var(--purple); color: var(--white); font-size: 0.55rem; padding: 0.1rem 0.35rem; border-radius: 4px; font-family: 'Share Tech Mono', monospace; vertical-align: middle; margin-left: 0.3rem; }
+.baseline-tag { background: rgba(255,215,0,0.15); color: var(--gold); font-size: 0.55rem; padding: 0.1rem 0.35rem; border-radius: 4px; margin-left: 0.3rem; }
+.lb-refresh { margin-top: 0.5rem; }
+
+/* ── About ── */
+.about-wrap { padding: 1.25rem; max-width: 600px; margin: 0 auto; }
+.about-crown { font-size: 3rem; text-align: center; filter: drop-shadow(0 0 16px gold); animation: crownPulse 2s ease-in-out infinite; }
+.about-title { font-family: 'Rubik Dirt', cursive; font-size: 2rem; background: linear-gradient(135deg, var(--purple), var(--pink), var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; text-align: center; margin: 0.5rem 0 1rem; }
+.about-intro { font-size: 0.95rem; color: var(--muted); line-height: 1.7; margin-bottom: 1.5rem; }
+.about-section { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 1.1rem; margin-bottom: 1rem; }
+.about-section-title { font-family: 'Permanent Marker', cursive; font-size: 1rem; color: var(--text); margin-bottom: 0.75rem; letter-spacing: 0.04em; }
+.about-rule { display: flex; align-items: flex-start; gap: 0.6rem; font-size: 0.9rem; color: var(--text); margin-bottom: 0.5rem; line-height: 1.5; }
+.pts { font-family: 'Share Tech Mono', monospace; font-size: 0.85rem; color: var(--pink); flex-shrink: 0; min-width: 60px; }
+.bonus-fire { color: var(--gold) !important; text-shadow: 0 0 8px rgba(255,215,0,0.5); }
+.bonus-full { color: var(--cyan) !important; }
+.about-why { font-size: 0.82rem; color: var(--muted); font-style: italic; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px solid var(--border); line-height: 1.6; }
+
+/* ── Bonus badge ── */
+.bonus-badge {
+  position: fixed; top: -80px; left: 50%; transform: translateX(-50%);
+  padding: 0.7rem 1.5rem; border-radius: 30px;
+  font-family: 'Permanent Marker', cursive; font-size: 0.9rem;
+  white-space: nowrap; z-index: 9999;
+  transition: top 0.4s cubic-bezier(0.34,1.56,0.64,1);
+  pointer-events: none;
+}
+.bonus-badge.show { top: 1rem; }
+.bonus-streak { background: linear-gradient(135deg, #ff6600, #ffcc00); color: #000; border: 2px solid #ffcc00; box-shadow: 0 0 24px rgba(255,200,0,0.6); }
+.bonus-fullsend { background: linear-gradient(135deg, var(--purple-deep), var(--pink)); color: var(--white); border: 2px solid var(--pink); box-shadow: 0 0 24px rgba(255,0,255,0.5); }
+.bonus-good { background: linear-gradient(135deg, #00aa44, #00ffaa); color: #000; border: 2px solid #00ffaa; box-shadow: 0 0 20px rgba(0,255,150,0.5); }
+
+/* ── Toast ── */
+.toast { position: fixed; top: 1rem; left: 50%; transform: translateX(-50%) translateY(-80px); background: linear-gradient(135deg, var(--purple-deep), var(--purple)); color: var(--white); font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.85rem; letter-spacing: 0.1em; text-transform: uppercase; padding: 0.6rem 1.4rem; border-radius: 30px; border: 1px solid var(--pink); box-shadow: 0 4px 24px rgba(224,0,224,0.5); z-index: 9999; transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1); white-space: nowrap; pointer-events: none; }
+.toast.show { transform: translateX(-50%) translateY(0); }
+
+@media (min-width: 600px) {
+  .app-title { font-size: 2.4rem; }
+  .set-col-hdrs, .set-row { grid-template-columns: 44px 1fr 1fr 34px; }
+  .set-input, .set-num-badge { height: 50px; }
+  .remove-btn { height: 50px; width: 34px; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:1rem">
+    <div style="font-size:3rem;animation:crownPulse 1.5s ease-in-out infinite">👑</div>
+    <div style="font-family:'Share Tech Mono',monospace;font-size:0.8rem;color:#888;letter-spacing:0.15em">LOADING GAINZ...</div>
+  </div>
+</div>
+</body>
+</html>
