@@ -256,6 +256,22 @@ window.doSignOut = async function() {
   await signOut(auth);
 };
 
+window.editUsername = async function() {
+  const current = userProfile?.username || '';
+  const newName = prompt('Enter your display name:', current);
+  if (!newName || newName.trim() === current) return;
+  const trimmed = newName.trim();
+  try {
+    await setDoc(doc(db, 'users', currentUser.uid, 'profile', 'info'), { username: trimmed });
+    userProfile.username = trimmed;
+    // Update displayed name everywhere
+    document.querySelectorAll('.displayed-username').forEach(el => el.textContent = trimmed);
+    showToast('✓ Name updated to ' + trimmed);
+  } catch(e) {
+    showToast('Could not update name');
+  }
+};
+
 // ── Pages ─────────────────────────────────────────────────────────────────────
 // ── Video modal ───────────────────────────────────────────────────────────────
 window.openVideo = function(e, vidId, isShorts) {
@@ -373,7 +389,10 @@ async function renderTracker() {
           ${crownHTML}
           <div>
             <div class="app-title">Gainz</div>
-            <div class="app-sub">${userProfile?.username || ''} · ${score.multiplier !== 1.0 ? (score.multiplier > 1.0 ? '📈 +'+Math.round((score.multiplier-1)*100)+'% multiplier' : '📉 '+Math.round((score.multiplier-1)*100)+'% multiplier') : 'Week 1 baseline'}</div>
+            <div class="app-sub">
+            <span class="displayed-username username-tap" onclick="editUsername()" title="Tap to edit name">${userProfile?.username || 'Tap to set name'} ✏️</span>
+            · ${score.multiplier !== 1.0 ? (score.multiplier > 1.0 ? '📈 +'+Math.round((score.multiplier-1)*100)+'% multiplier' : '📉 '+Math.round((score.multiplier-1)*100)+'% multiplier') : 'Week 1 baseline'}
+          </div>
           </div>
         </div>
         <div class="header-btns">
@@ -771,7 +790,7 @@ function navBar(active) {
       <div class="header-left">
         <div>
           <div class="app-title">Gainz</div>
-          <div class="app-sub">${userProfile?.username || ''}</div>
+          <div class="app-sub"><span class="displayed-username username-tap" onclick="editUsername()" title="Tap to edit name">${userProfile?.username || 'Tap to set name'} ✏️</span></div>
         </div>
       </div>
       <div class="header-btns">
@@ -1099,6 +1118,16 @@ header {
 /* ── Toast ── */
 .toast { position: fixed; top: 1rem; left: 50%; transform: translateX(-50%) translateY(-80px); background: linear-gradient(135deg, var(--purple-deep), var(--purple)); color: var(--white); font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.85rem; letter-spacing: 0.1em; text-transform: uppercase; padding: 0.6rem 1.4rem; border-radius: 30px; border: 1px solid var(--pink); box-shadow: 0 4px 24px rgba(224,0,224,0.5); z-index: 9999; transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1); white-space: nowrap; pointer-events: none; }
 .toast.show { transform: translateX(-50%) translateY(0); }
+
+/* ── Tappable username ── */
+.username-tap {
+  cursor: pointer;
+  border-bottom: 1px dashed var(--muted);
+  padding-bottom: 1px;
+  transition: color 0.15s, border-color 0.15s;
+  display: inline-block;
+}
+.username-tap:active { color: var(--pink); border-color: var(--pink); }
 
 @media (min-width: 600px) {
   .app-title { font-size: 2.4rem; }
