@@ -11,7 +11,7 @@
 <!-- Firebase -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getAuth, RecaptchaVerifier, signInWithPhoneNumber, signOut, onAuthStateChanged }
+import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import { getFirestore, doc, setDoc, getDoc, collection, getDocs, query, orderBy }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
@@ -128,8 +128,6 @@ let userProfile = null;
 let localData   = {};
 let currentWeek = getWeekKey();
 let currentPage = 'login'; // login | tracker | leaderboard | about
-let recaptchaVerifier = null;
-let confirmationResult = null;
 let allUsersCache = [];
 
 // ── Auth state ────────────────────────────────────────────────────────────────
@@ -211,51 +209,40 @@ async function checkWinner() {
   } catch(e) { return []; }
 }
 
-// ── Phone auth ────────────────────────────────────────────────────────────────
-window.initRecaptcha = function() {
-  if (recaptchaVerifier) return;
-  recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-    size: 'normal',
-    callback: () => { document.getElementById('send-code-btn').disabled = false; }
-  });
-  recaptchaVerifier.render();
-};
+// ── Email auth ────────────────────────────────────────────────────────────────
+window.doLogin = async function() {
+  const email = document.getElementById('email-input').value.trim();
+  const pass  = document.getElementById('pass-input').value;
+  const uname = document.getElementById('uname-input').value.trim();
+  if (!email || !pass) { showToast('Enter email and password'); return; }
 
-window.sendCode = async function() {
-  const phone = document.getElementById('phone-input').value.trim();
-  if (!phone) { showToast('Enter your phone number'); return; }
+  // Try sign in first
   try {
-    confirmationResult = await signInWithPhoneNumber(auth, phone, recaptchaVerifier);
-    document.getElementById('login-step1').style.display = 'none';
-    document.getElementById('login-step2').style.display = 'block';
-    showToast('Code sent! Check your texts 📱');
+    await signInWithEmailAndPassword(auth, email, pass);
+    return;
   } catch(e) {
-    showToast('Error: ' + e.message);
+    if (e.code !== 'auth/user-not-found' && e.code !== 'auth/invalid-credential' && e.code !== 'auth/invalid-email') {
+      // wrong password or other error
+      showToast('Wrong password — try again');
+      return;
+    }
+  }
+
+  // New user — create account
+  if (!uname) {
+    document.getElementById('new-user-fields').style.display = 'block';
+    document.getElementById('login-hint').textContent = 'Looks like you\'re new! Enter a display name and hit Join.';
+    showToast('New account — add your name below');
+    return;
+  }
+  try {
+    const result = await createUserWithEmailAndPassword(auth, email, pass);
+    await setDoc(doc(db, 'users', result.user.uid, 'profile', 'info'), { username: uname });
+    userProfile = { username: uname };
+  } catch(e) {
+    showToast('Error: ' + e.code);
     console.error(e);
   }
-};
-
-window.verifyCode = async function() {
-  const code = document.getElementById('code-input').value.trim();
-  if (!code) { showToast('Enter the 6-digit code'); return; }
-  try {
-    const result = await confirmationResult.confirm(code);
-    // Check if new user — set username
-    const profileRef = doc(db, 'users', result.user.uid, 'profile', 'info');
-    const snap = await getDoc(profileRef);
-    if (!snap.exists()) {
-      document.getElementById('login-step2').style.display = 'none';
-      document.getElementById('login-step3').style.display = 'block';
-    }
-  } catch(e) { showToast('Wrong code — try again'); }
-};
-
-window.setUsername = async function() {
-  const username = document.getElementById('username-input').value.trim();
-  if (!username) { showToast('Enter a username'); return; }
-  await setDoc(doc(db, 'users', currentUser.uid, 'profile', 'info'), { username });
-  userProfile = { username };
-  showPage('tracker');
 };
 
 window.doSignOut = async function() {
@@ -283,29 +270,21 @@ function renderLogin() {
       <div class="login-sub">WHO WANTS THE CROWN THIS WEEK?</div>
     </div>
 
-    <div id="login-step1" class="login-card">
-      <div class="login-label">YOUR PHONE NUMBER</div>
-      <input id="phone-input" class="login-input" type="tel" placeholder="+1 (555) 000-0000"
-        inputmode="tel" autocomplete="tel">
-      <div id="recaptcha-container" style="margin:1rem 0;display:flex;justify-content:center"></div>
-      <button id="send-code-btn" class="login-btn" onclick="sendCode()" disabled>
-        SEND CODE 📱
+    <div class="login-card">
+      <div class="login-label">EMAIL</div>
+      <input id="email-input" class="login-input" type="email" placeholder="you@email.com"
+        inputmode="email" autocomplete="email">
+      <div class="login-label" style="margin-top:0.75rem">PASSWORD</div>
+      <input id="pass-input" class="login-input" type="password" placeholder="••••••••"
+        autocomplete="current-password">
+      <div id="new-user-fields" style="display:none">
+        <div class="login-label" style="margin-top:0.75rem">YOUR NAME (leaderboard)</div>
+        <input id="uname-input" class="login-input" type="text" placeholder="e.g. Dad, Mom, Champ...">
+      </div>
+      <button class="login-btn" onclick="doLogin()" style="margin-top:0.25rem">
+        LET'S GO 🔥
       </button>
-      <div class="login-hint">We'll text you a 6-digit code</div>
-    </div>
-
-    <div id="login-step2" class="login-card" style="display:none">
-      <div class="login-label">ENTER YOUR CODE</div>
-      <input id="code-input" class="login-input" type="number" inputmode="numeric"
-        placeholder="_ _ _ _ _ _" maxlength="6">
-      <button class="login-btn" onclick="verifyCode()">VERIFY ✓</button>
-    </div>
-
-    <div id="login-step3" class="login-card" style="display:none">
-      <div class="login-label">CHOOSE YOUR NAME</div>
-      <div class="login-hint" style="margin-bottom:0.75rem">This is what the leaderboard shows</div>
-      <input id="username-input" class="login-input" type="text" placeholder="e.g. Dad, Mom, Champ...">
-      <button class="login-btn" onclick="setUsername()">LET'S GO 🔥</button>
+      <div class="login-hint" id="login-hint">First time? Just enter an email, password and hit go — we'll set you up!</div>
     </div>
   </div>`;
   setTimeout(initRecaptcha, 300);
