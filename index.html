@@ -362,7 +362,7 @@ async function showPage(page, updateHash=true) {
   document.getElementById('app').innerHTML = '';
   if (page === 'login')       renderLogin();
   if (page === 'tracker')     await renderTracker();
-  if (page === 'leaderboard') await renderLeaderboard();
+  if (page === 'leaderboard') { await renderLeaderboard(null); return; }
   if (page === 'about')       renderAbout();
 }
 window.showPage = showPage;
@@ -786,15 +786,15 @@ window.collectAndSave = async function() {
 
 // ── LEADERBOARD ───────────────────────────────────────────────────────────────
 async function renderLeaderboard(results) {
-  if (!results) {
+  // Always show loading screen first, then fetch if no results passed
+  if (!results || results.length === 0) {
     document.getElementById('app').innerHTML = `
     <div class="app-wrap">
       ${navBar('leaderboard')}
       <div class="scroll-area">
         <div style="text-align:center;padding:3rem;color:var(--muted)">
-          <div style="font-size:2rem">⏳</div>
+          <div style="font-size:2rem;animation:crownPulse 1.5s infinite">👑</div>
           <div style="margin-top:0.5rem;font-family:'Share Tech Mono',monospace;font-size:0.8rem">Loading leaderboard...</div>
-          <div style="margin-top:0.5rem;font-size:0.7rem;color:var(--border)">If this hangs, check Firestore rules</div>
         </div>
       </div>
     </div>
