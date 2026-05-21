@@ -182,9 +182,13 @@ async function loadLeaderboard() {
       const prevSnap = await getDoc(doc(db, 'users', uid, 'weeks', getPrevWeekKey()));
       const prevData = prevSnap.exists() ? prevSnap.data() : null;
       const score = calcScore(weekData, prevData);
-      results.push({ uid, username: profile.username || '???', score });
+      // Always push even if no data this week — shows 0 on leaderboard
+      results.push({ uid, username: profile.username || 'Unknown', score });
     }
-    results.sort((a,b) => b.score.total - a.score.total);
+    results.sort((a,b) => {
+      if (b.score.total !== a.score.total) return b.score.total - a.score.total;
+      return a.username.localeCompare(b.username);
+    });
     allUsersCache = results;
     renderLeaderboard(results);
   } catch(e) { console.error(e); }
@@ -603,7 +607,10 @@ async function renderLeaderboard(results) {
     const multClass = r.score.multiplier > 1.0 ? 'mult-good' : r.score.multiplier < 1.0 ? 'mult-bad' : '';
     return `
     <div class="lb-row ${isMe ? 'lb-me' : ''} ${isWinner ? 'lb-winner' : ''}">
-      <div class="lb-rank">${i === 0 ? '👑' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i+1}`}</div>
+      <div class="lb-rank">${
+        r.score.total === 0 ? '#' + (i+1) :
+        i === 0 ? '👑' : i === 1 ? '🥈' : i === 2 ? '🥉' : '#' + (i+1)
+      }</div>
       <div class="lb-info">
         <div class="lb-name">${r.username}${isMe ? ' <span class="you-tag">YOU</span>' : ''}</div>
         <div class="lb-detail">
@@ -612,7 +619,7 @@ async function renderLeaderboard(results) {
           ${r.score.isWeek1 ? '<span class="baseline-tag">BASELINE WK</span>' : ''}
         </div>
       </div>
-      <div class="lb-score">${r.score.total}</div>
+      <div class="lb-score">${r.score.total || 0}</div>
     </div>`;
   }).join('');
 
