@@ -136,7 +136,10 @@ onAuthStateChanged(auth, async user => {
     currentUser = user;
     await loadUserProfile();
     await loadUserData();
-    showPage('tracker');
+    // Restore page from hash if present
+    const hash = window.location.hash.replace('#','');
+    const validPages = ['tracker','leaderboard','about'];
+    await showPage(validPages.includes(hash) ? hash : 'tracker', false);
   } else {
     currentUser = null;
     showPage('login');
@@ -254,8 +257,13 @@ window.doSignOut = async function() {
 };
 
 // ── Pages ─────────────────────────────────────────────────────────────────────
-async function showPage(page) {
+async function showPage(page, updateHash=true) {
   currentPage = page;
+  if (updateHash && page !== 'login') {
+    window.location.hash = page;
+  } else if (page === 'login') {
+    window.location.hash = '';
+  }
   document.getElementById('app').innerHTML = '';
   if (page === 'login')       renderLogin();
   if (page === 'tracker')     await renderTracker();
@@ -263,6 +271,14 @@ async function showPage(page) {
   if (page === 'about')       renderAbout();
 }
 window.showPage = showPage;
+
+// Restore page from hash on refresh
+window.addEventListener('hashchange', async () => {
+  const hash = window.location.hash.replace('#','');
+  if (currentUser && hash && hash !== currentPage) {
+    await showPage(hash, false);
+  }
+});
 
 // ── LOGIN ─────────────────────────────────────────────────────────────────────
 function renderLogin() {
