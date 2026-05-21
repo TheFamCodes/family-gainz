@@ -320,6 +320,8 @@ window.closeVideo = function() {
 };
 
 async function showPage(page, updateHash=true) {
+  // Clear leaderboard auto-refresh when navigating away
+  if (window._lbRefreshTimer) { clearInterval(window._lbRefreshTimer); window._lbRefreshTimer = null; }
   currentPage = page;
   if (updateHash && page !== 'login') {
     window.location.hash = page;
@@ -566,17 +568,33 @@ window.addSet = function(exId) {
   const div = document.createElement('div');
   div.innerHTML = buildSetRow(exId, idx, {reps:'',weight:''});
   container.appendChild(div.firstElementChild);
-  container.querySelectorAll('.set-input').forEach(el =>
-    el.addEventListener('change', onDataChange));
+  container.querySelectorAll('.set-input').forEach(el => {
+    el.addEventListener('change', onDataChange);
+    el.addEventListener('blur', async () => {
+      collectDOM();
+      await saveUserData();
+    });
+  });
 };
 
-window.removeSet = function(btn, exId) {
+window.removeSet = async function(btn, exId) {
   const container = document.getElementById(`sets-${exId}`);
-  if (container.querySelectorAll('.set-row').length <= 1) return;
+  if (container.querySelectorAll('.set-row').length <= 1) {
+    // If only one set left, just clear the values instead of removing
+    const row = container.querySelector('.set-row');
+    row.querySelector('.reps-in').value = '';
+    row.querySelector('.weight-in').value = '';
+    collectDOM();
+    await saveUserData();
+    showToast('Set cleared');
+    return;
+  }
   btn.closest('.set-row').remove();
   container.querySelectorAll('.set-row').forEach((row,i) =>
     row.querySelector('.set-num-badge').textContent = `S${i+1}`);
-  onDataChange();
+  collectDOM();
+  await saveUserData();
+  showToast('Set removed');
 };
 
 window.toggleDay = function(dayIdx) {
@@ -593,8 +611,14 @@ window.toggleDay = function(dayIdx) {
 };
 
 function attachInputEvents() {
-  document.querySelectorAll('.set-input, .notes-ta, .week-date').forEach(el =>
-    el.addEventListener('change', onDataChange));
+  document.querySelectorAll('.set-input, .notes-ta, .week-date').forEach(el => {
+    el.addEventListener('change', onDataChange);
+    // Auto-save when user clicks/taps out of any input
+    el.addEventListener('blur', async () => {
+      collectDOM();
+      await saveUserData();
+    });
+  });
 }
 
 function onDataChange() {
@@ -647,6 +671,13 @@ function updateScoreBar() {
     el.offsetHeight;
     el.style.animation = 'scoreFlash 0.4s ease';
   }
+}
+
+// Push latest score to Firebase so leaderboard reflects it in real time
+async function pushScoreUpdate() {
+  if (!currentUser) return;
+  collectDOM();
+  await saveUserData();
 }
 
 function showBonus(msg, type) {
