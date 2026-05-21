@@ -63,7 +63,7 @@ function getPrevWeekKey() {
 }
 
 function calcScore(weekData, prevWeekData) {
-  if (!weekData) return { total: 0, consistency: 0, effort: 0, multiplier: 1.0, breakdown: [] };
+  if (!weekData) return { total: 0, consistency: 0, effort: 0, multiplier: 1.0, breakdown: [], isWeek1: true };
   const breakdown = [];
   let consistency = 0;
   let effortRaw = 0;
@@ -256,6 +256,19 @@ window.doSignOut = async function() {
   await signOut(auth);
 };
 
+window.resetPassword = async function() {
+  const email = document.getElementById('reset-email-input')?.value.trim()
+    || document.getElementById('email-input')?.value.trim();
+  if (!email) { showToast('Enter your email first'); return; }
+  try {
+    const { sendPasswordResetEmail } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
+    await sendPasswordResetEmail(auth, email);
+    showToast('✓ Reset email sent! Check your inbox');
+  } catch(e) {
+    showToast('Error: ' + (e.code === 'auth/user-not-found' ? 'Email not found' : e.message));
+  }
+};
+
 window.editUsername = async function() {
   const current = userProfile?.username || '';
   const newName = prompt('Enter your display name:', current);
@@ -428,6 +441,7 @@ function renderLogin() {
         LET'S GO 🔥
       </button>
       <div class="login-hint" id="login-hint">First time? Just enter an email, password and hit go — we'll set you up!</div>
+      <button class="forgot-btn" onclick="resetPassword()">Forgot password? Send reset email</button>
     </div>
   </div>`;
   setTimeout(initRecaptcha, 300);
@@ -762,6 +776,7 @@ async function renderLeaderboard(results) {
         <div style="text-align:center;padding:3rem;color:var(--muted)">
           <div style="font-size:2rem">⏳</div>
           <div style="margin-top:0.5rem;font-family:'Share Tech Mono',monospace;font-size:0.8rem">Loading leaderboard...</div>
+          <div style="margin-top:0.5rem;font-size:0.7rem;color:var(--border)">If this hangs, check Firestore rules</div>
         </div>
       </div>
     </div>
@@ -1208,6 +1223,17 @@ header {
 /* ── Toast ── */
 .toast { position: fixed; top: 1rem; left: 50%; transform: translateX(-50%) translateY(-80px); background: linear-gradient(135deg, var(--purple-deep), var(--purple)); color: var(--white); font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 0.85rem; letter-spacing: 0.1em; text-transform: uppercase; padding: 0.6rem 1.4rem; border-radius: 30px; border: 1px solid var(--pink); box-shadow: 0 4px 24px rgba(224,0,224,0.5); z-index: 9999; transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1); white-space: nowrap; pointer-events: none; }
 .toast.show { transform: translateX(-50%) translateY(0); }
+
+/* ── Forgot password ── */
+.forgot-btn {
+  width: 100%; background: none; border: none;
+  color: var(--muted); font-family: 'Rajdhani', sans-serif;
+  font-size: 0.82rem; margin-top: 0.75rem;
+  cursor: pointer; text-decoration: underline;
+  text-underline-offset: 3px; padding: 0.25rem;
+  transition: color 0.15s; letter-spacing: 0.03em;
+}
+.forgot-btn:active { color: var(--cyan); }
 
 /* ── Tappable username ── */
 .username-tap {
