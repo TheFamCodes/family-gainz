@@ -344,6 +344,65 @@ window.addEventListener('hashchange', async () => {
   }
 });
 
+// ── Pull to refresh ───────────────────────────────────────────────────────────
+(function() {
+  let startY = 0;
+  let pulling = false;
+  let indicator = null;
+
+  function createIndicator() {
+    if (document.getElementById('ptr-indicator')) return;
+    const el = document.createElement('div');
+    el.id = 'ptr-indicator';
+    el.innerHTML = '↓ Pull to refresh';
+    el.style.cssText = `
+      position:fixed; top:-48px; left:50%; transform:translateX(-50%);
+      background:linear-gradient(135deg,#7B00A0,#FF00FF);
+      color:#fff; font-family:'Permanent Marker',cursive;
+      font-size:0.8rem; letter-spacing:0.08em;
+      padding:0.5rem 1.4rem; border-radius:0 0 20px 20px;
+      z-index:99999; transition:top 0.2s ease;
+      box-shadow:0 4px 16px rgba(255,0,255,0.4);
+      white-space:nowrap; pointer-events:none;`;
+    document.body.appendChild(el);
+    return el;
+  }
+
+  document.addEventListener('touchstart', (e) => {
+    const scrollEl = document.querySelector('.scroll-area');
+    if (!scrollEl || scrollEl.scrollTop > 0) return;
+    startY = e.touches[0].clientY;
+    pulling = true;
+    indicator = createIndicator() || document.getElementById('ptr-indicator');
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!pulling) return;
+    const scrollEl = document.querySelector('.scroll-area');
+    if (!scrollEl || scrollEl.scrollTop > 0) { pulling = false; return; }
+    const dist = Math.min(e.touches[0].clientY - startY, 80);
+    if (dist > 10 && indicator) {
+      indicator.style.top = Math.min(dist - 48, 12) + 'px';
+      indicator.innerHTML = dist > 55 ? '↑ Release to refresh' : '↓ Pull to refresh';
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchend', async (e) => {
+    if (!pulling) return;
+    pulling = false;
+    const dist = e.changedTouches[0].clientY - startY;
+    if (indicator) {
+      indicator.style.top = '-48px';
+      indicator.innerHTML = '↓ Pull to refresh';
+    }
+    if (dist > 55) {
+      // Refresh current page
+      if (window.showToast) showToast('Refreshing...');
+      await showPage(currentPage, false);
+    }
+  }, { passive: true });
+})();
+
 // ── LOGIN ─────────────────────────────────────────────────────────────────────
 function renderLogin() {
   document.getElementById('app').innerHTML = `
